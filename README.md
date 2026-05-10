@@ -8,45 +8,6 @@ Distributed AI swarm platform with:
 - task execution
 - PXE auto-join infrastructure
 
-🧾 CHANGELOG — HyperSwarm Update
-🚀 Agent Runtime V2 (stability upgrade)
-✨ Added
-Introduced task queue (deque buffer) for safer task handling
-Added retry mechanism with exponential backoff
-Implemented structured logging system (INFO/WARN/ERROR)
-Added task validation layer (assigned + node match)
-Separated execution pipeline:
-fetch → queue → process → execute → report
-🔁 Improved
-Ollama calls now wrapped with timeout + error handling
-Control plane requests hardened with try/except + logging
-Task execution flow now resilient to transient failures
-🧠 Reliability upgrades
-Agent no longer blocks on single task failure
-Failed LLM calls automatically retried (up to 3 attempts)
-Permanent failure handling with explicit error reporting
-Queue-based processing prevents task loss during fetch cycles
-🧹 Refactored
-Clean separation of responsibilities:
-fetch_tasks()
-update_queue()
-process_task()
-execute_with_retry()
-Removed implicit inline execution loop
-Structured main loop for predictable runtime behavior
-📡 System impact
-Agent runtime is now production-stable worker model
-Enables safe scaling to multiple nodes
-Prepares foundation for:
-distributed scheduling
-memory injection layer
-observability integration
-🧭 Next steps (planned)
-Streaming LLM responses (token-level logs)
-Memory (MSA integration)
-Smart dispatch scoring in control plane
-Gossip registry sync between nodes
-
 
 er Manifesto! ....------>
 
