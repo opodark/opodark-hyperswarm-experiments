@@ -1,15 +1,24 @@
-class Agent:
+import time
+import requests
 
-    def __init__(self, name, role, model):
+OLLAMA_URL = "http://localhost:11434"
 
-        self.name = name
-        self.role = role
-        self.model = model
+def ask_model(prompt):
 
-    def run(self, task):
-
-        return {
-            "agent": self.name,
-            "task": task,
-            "status": "completed"
+    return requests.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={
+            "model": "phi3:mini",
+            "prompt": prompt,
+            "stream": False
         }
+    ).json()["response"]
+
+
+while True:
+
+    result = ask_model("You are a swarm node. Say status.")
+
+    print(result)
+
+    time.sleep(30)

@@ -1,0 +1,9 @@
+# Infra Layer
+
+This folder defines deployment and boot infrastructure for HyperSwarm nodes.
+
+Components:
+- PXE boot server (netboot.xyz)
+- Ubuntu minimal provisioning
+- cloud-init automation
+- future: packer + ansible orchestration

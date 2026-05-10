@@ -2,6 +2,11 @@
 
 hostname: hyperswarm-node
 
+users:
+  - name: swarm
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+
 package_update: true
 package_upgrade: true
 
@@ -11,30 +16,53 @@ packages:
   - python3
   - python3-pip
   - docker.io
+  - jq
+
+write_files:
+
+  - path: /opt/hyperswarm/config.json
+    content: |
+      {
+        "role": "auto",
+        "status": "booting"
+      }
 
 runcmd:
 
-  # install ollama
+  # ─────────────────────────────
+  # 1. INSTALL OLLAMA
+  # ─────────────────────────────
+
   - curl -fsSL https://ollama.com/install.sh | sh
 
-  # start ollama
   - systemctl enable ollama
   - systemctl start ollama
 
-  # wait ollama
   - sleep 10
 
-  # pull model
+  # ─────────────────────────────
+  # 2. LOAD BASE MODEL (BOOTSTRAP)
+  # ─────────────────────────────
+
   - ollama pull phi3:mini
 
-  # create swarm dir
-  - mkdir -p /opt/hyperswarm
+  # ─────────────────────────────
+  # 3. INSTALL SWARM AGENT
+  # ─────────────────────────────
 
-  # clone repo
+  - mkdir -p /opt/hyperswarm
   - git clone https://github.com/opodark/hyperswarm.git /opt/hyperswarm
 
-  # install python deps
-  - pip3 install fastapi uvicorn requests
+  - pip3 install fastapi uvicorn requests pydantic
 
-  # bootstrap node
+  # ─────────────────────────────
+  # 4. REGISTER NODE
+  # ─────────────────────────────
+
   - python3 /opt/hyperswarm/bootstrap/client/bootstrap.py
+
+  # ─────────────────────────────
+  # 5. START AGENT SERVICE
+  # ─────────────────────────────
+
+  - nohup python3 /opt/hyperswarm/agent/runtime.py &
