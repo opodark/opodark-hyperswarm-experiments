@@ -48,11 +48,11 @@ services:
   # HYPERSWARM CONTROL PLANE
   # ─────────────────────────────
 
-  control_plane:
+  control-plane:
 
     image: python:3.11-slim
 
-    container_name: hyperswarm-control_plane
+    container_name: hyperswarm-control-plane
 
     working_dir: /app
 

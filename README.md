@@ -44,7 +44,7 @@ observability integration
 🧭 Next steps (planned)
 Streaming LLM responses (token-level logs)
 Memory (MSA integration)
-Smart dispatch scoring in control_plane
+Smart dispatch scoring in control plane
 Gossip registry sync between nodes
 
 
