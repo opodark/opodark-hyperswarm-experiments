@@ -1,0 +1,5 @@
+ansible-playbook -i infra/ansible/inventory/hosts.yml infra/ansible/playbooks/bootstrap.yml
+
+#macos cmd
+
+make deploy-swarm

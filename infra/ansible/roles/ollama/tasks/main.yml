@@ -1,0 +1,15 @@
+- name: Install Ollama
+  shell: curl -fsSL https://ollama.com/install.sh | sh
+
+- name: Enable Ollama service
+  systemd:
+    name: ollama
+    enabled: yes
+    state: started
+
+- name: Wait for Ollama
+  pause:
+    seconds: 10
+
+- name: Pull base model
+  shell: ollama pull phi3:mini

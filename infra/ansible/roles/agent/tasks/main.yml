@@ -1,0 +1,17 @@
+- name: Create swarm directory
+  file:
+    path: /opt/hyperswarm
+    state: directory
+
+- name: Clone repository
+  git:
+    repo: https://github.com/opodark/hyperswarm.git
+    dest: /opt/hyperswarm
+
+- name: Install Python deps
+  pip:
+    name:
+      - fastapi
+      - uvicorn
+      - requests
+      - pydantic

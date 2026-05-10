@@ -1,0 +1,3 @@
+- name: Register node to swarm
+  shell: |
+    python3 /opt/hyperswarm/bootstrap/client/bootstrap.py

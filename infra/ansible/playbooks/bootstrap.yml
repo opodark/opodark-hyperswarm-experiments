@@ -1,0 +1,9 @@
+- name: HyperSwarm Node Bootstrap
+  hosts: swarm_nodes
+  become: yes
+
+  roles:
+    - base
+    - ollama
+    - agent
+    - swarm
