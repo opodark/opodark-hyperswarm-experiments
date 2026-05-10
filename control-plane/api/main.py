@@ -1,6 +1,24 @@
 from fastapi import FastAPI
 from datetime import datetime
+from fastapi import FastAPI
 
+app = FastAPI()
+
+REGISTRY = {"nodes": {}}
+
+
+@app.get("/registry")
+def get_registry():
+
+    return REGISTRY
+
+
+@app.post("/registry/update")
+def update_registry(data: dict):
+
+    REGISTRY.update(data)
+
+    return {"ok": True}
 app = FastAPI(title="HyperSwarm Control Plane")
 
 # ─────────────────────────────
