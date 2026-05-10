@@ -1,0 +1,1937 @@
+=== ./infra/readme ===
+# Infra Layer
+
+This folder defines deployment and boot infrastructure for HyperSwarm nodes.
+
+Components:
+- PXE boot server (netboot.xyz)
+- Ubuntu minimal provisioning
+- cloud-init automation
+- future: packer + ansible orchestration
+
+=== ./infra/ansible/roles/swarm/tasks/main.yml ===
+- name: Register node to swarm
+  shell: |
+    python3 /opt/hyperswarm/bootstrap/client/bootstrap.py
+
+=== ./infra/ansible/roles/agent/tasks/main.yml ===
+- name: Create swarm directory
+  file:
+    path: /opt/hyperswarm
+    state: directory
+
+- name: Clone repository
+  git:
+    repo: https://github.com/opodark/hyperswarm.git
+    dest: /opt/hyperswarm
+
+- name: Install Python deps
+  pip:
+    name:
+      - fastapi
+      - uvicorn
+      - requests
+      - pydantic
+
+=== ./infra/ansible/roles/ollama/tasks/main.yml ===
+- name: Install Ollama
+  shell: curl -fsSL https://ollama.com/install.sh | sh
+
+- name: Enable Ollama service
+  systemd:
+    name: ollama
+    enabled: yes
+    state: started
+
+- name: Wait for Ollama
+  pause:
+    seconds: 10
+
+- name: Pull base model
+  shell: ollama pull phi3:mini
+
+=== ./infra/ansible/roles/base/tasks/main.yml ===
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install base packages
+  apt:
+    name:
+      - curl
+      - git
+      - python3
+      - python3-pip
+      - jq
+    state: present
+
+=== ./infra/ansible/playbooks/ollama.yml ===
+
+
+=== ./infra/ansible/playbooks/swarm.yml ===
+
+
+=== ./infra/ansible/playbooks/bootstrap.yml ===
+- name: HyperSwarm Node Bootstrap
+  hosts: swarm_nodes
+  become: yes
+
+  roles:
+    - base
+    - ollama
+    - agent
+    - swarm
+
+=== ./infra/ansible/playbooks/agent.yml ===
+
+
+=== ./infra/ansible/readme ===
+ansible-playbook -i infra/ansible/inventory/hosts.yml infra/ansible/playbooks/bootstrap.yml
+
+#macos cmd
+
+make deploy-swarm
+
+=== ./infra/ansible/swarm-bootstrap.yml ===
+
+
+=== ./infra/ansible/inventory/hosts.yml ===
+all:
+  hosts:
+    node1:
+      ansible_host: 192.168.1.101
+    node2:
+      ansible_host: 192.168.1.102
+
+  vars:
+    ansible_user: swarm
+
+=== ./infra/pxe/docker-compose.yml ===
+services:
+
+  netbootxyz:
+
+    image: ghcr.io/netbootxyz/netbootxyz
+
+    container_name: netbootxyz
+
+    ports:
+      - "3000:3000"
+      - "69:69/udp"
+
+    restart: unless-stopped
+
+=== ./infra/cloud-init/meta-data ===
+instance-id: hyperswarm-node
+local-hostname: hyperswarm-node
+
+=== ./infra/cloud-init/user-data ===
+#cloud-config
+
+hostname: hyperswarm-node
+
+users:
+  - name: swarm
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - git
+  - python3
+  - python3-pip
+  - docker.io
+  - jq
+
+write_files:
+
+  - path: /opt/hyperswarm/config.json
+    content: |
+      {
+        "role": "auto",
+        "status": "booting"
+      }
+
+runcmd:
+
+  # ─────────────────────────────
+  # 1. INSTALL OLLAMA
+  # ─────────────────────────────
+
+  - curl -fsSL https://ollama.com/install.sh | sh
+
+  - systemctl enable ollama
+  - systemctl start ollama
+
+  - sleep 10
+
+  # ─────────────────────────────
+  # 2. LOAD BASE MODEL (BOOTSTRAP)
+  # ─────────────────────────────
+
+  - ollama pull phi3:mini
+
+  # ─────────────────────────────
+  # 3. INSTALL SWARM AGENT
+  # ─────────────────────────────
+
+  - mkdir -p /opt/hyperswarm
+  - git clone https://github.com/opodark/hyperswarm.git /opt/hyperswarm
+
+  - pip3 install fastapi uvicorn requests pydantic
+
+  # ─────────────────────────────
+  # 4. REGISTER NODE
+  # ─────────────────────────────
+
+  - python3 /opt/hyperswarm/bootstrap/client/bootstrap.py
+
+  # ─────────────────────────────
+  # 5. START AGENT SERVICE
+  # ─────────────────────────────
+
+  - nohup python3 /opt/hyperswarm/agent/runtime.py &
+
+=== ./bootstrap/server/readme ===
+uvicorn main:app --host 0.0.0.0 --port 9000
+
+POST /register
+
+POST /heartbeat
+
+GET /nodes
+
+=== ./bootstrap/server/main.py ===
+from fastapi import FastAPI
+from datetime import datetime, timedelta
+from typing import Dict
+
+app = FastAPI(title="HyperSwarm Bootstrap Server")
+
+# ─────────────────────────────
+# NODE REGISTRY (in-memory MVP)
+# ─────────────────────────────
+
+NODES: Dict[str, dict] = {}
+
+HEARTBEAT_TIMEOUT_SECONDS = 30
+
+
+# ─────────────────────────────
+# REGISTER NODE
+# ─────────────────────────────
+
+@app.post("/register")
+def register(node: dict):
+
+    node_id = node.get("node_id")
+
+    if not node_id:
+        return {"error": "missing node_id"}
+
+    node["last_seen"] = datetime.utcnow().isoformat()
+    node["status"] = "online"
+
+    NODES[node_id] = node
+
+    return {
+        "status": "registered",
+        "node_id": node_id
+    }
+
+
+# ─────────────────────────────
+# HEARTBEAT
+# ─────────────────────────────
+
+@app.post("/heartbeat")
+def heartbeat(payload: dict):
+
+    node_id = payload.get("node_id")
+
+    if node_id not in NODES:
+        return {"error": "node not registered"}
+
+    NODES[node_id]["last_seen"] = datetime.utcnow().isoformat()
+    NODES[node_id]["status"] = "online"
+
+    return {"status": "ok"}
+
+
+# ─────────────────────────────
+# GET ALL NODES
+# ─────────────────────────────
+
+@app.get("/nodes")
+def get_nodes():
+
+    now = datetime.utcnow()
+
+    updated = {}
+
+    for node_id, node in NODES.items():
+
+        last_seen = datetime.fromisoformat(node["last_seen"])
+
+        delta = now - last_seen
+
+        if delta > timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS):
+            node["status"] = "stale"
+        else:
+            node["status"] = "online"
+
+        updated[node_id] = node
+
+    return updated
+
+
+# ─────────────────────────────
+# HEALTH CHECK
+# ─────────────────────────────
+
+@app.get("/")
+def root():
+
+    return {
+        "service": "hyperswarm-bootstrap",
+        "nodes": len(NODES)
+    }
+
+=== ./bootstrap/client/bootstrap.py ===
+import uuid
+import socket
+import requests
+import time
+import os
+
+from control_plane.core.state import (
+    init_state,
+    is_provisioned,
+    mark_provisioned
+)
+
+BOOTSTRAP_SERVER = "http://192.168.1.10:9000"
+STATE_NODE_ID_PATH = "/etc/hyperswarm/node_id"
+
+def get_or_create_node_id():
+    os.makedirs("/etc/hyperswarm", exist_ok=True)
+
+    if os.path.exists(STATE_NODE_ID_PATH):
+        with open(STATE_NODE_ID_PATH, "r") as f:
+            return f.read().strip()
+
+    node_id = str(uuid.uuid4())
+
+    with open(STATE_NODE_ID_PATH, "w") as f:
+        f.write(node_id)
+
+    return node_id
+
+def build_node(node_id):
+    return {
+        "node_id": node_id,
+        "hostname": socket.gethostname(),
+        "ip": socket.gethostbyname(socket.gethostname()),
+        "role": "auto",
+        "model": "phi3:mini",
+        "capabilities": [
+            "ollama",
+            "cpu"
+        ]
+    }
+
+def register(node):
+    try:
+        r = requests.post(
+            f"{BOOTSTRAP_SERVER}/register",
+            json=node,
+            timeout=5
+        )
+        print("[BOOTSTRAP] registered:", r.json())
+        return True
+    except Exception as e:
+        print("[BOOTSTRAP ERROR]", e)
+        return False
+
+def heartbeat(node_id):
+    while True:
+        try:
+            requests.post(
+                f"{BOOTSTRAP_SERVER}/heartbeat",
+                json={"node_id": node_id},
+                timeout=5
+            )
+            print("[HEARTBEAT] ok")
+        except Exception as e:
+            print("[HEARTBEAT ERROR]", e)
+
+        time.sleep(10)
+
+def main():
+    node_id = get_or_create_node_id()
+
+    init_state(node_id=node_id)
+
+    if is_provisioned():
+        print("[BOOTSTRAP] already provisioned, skipping deploy")
+        heartbeat(node_id)
+        return
+
+    node = build_node(node_id)
+    ok = register(node)
+
+    if not ok:
+        print("[BOOTSTRAP] failed registration, retrying loop")
+        heartbeat(node_id)
+        return
+
+    mark_provisioned()
+    print("[BOOTSTRAP] provisioning complete")
+    heartbeat(node_id)
+
+if __name__ == "__main__":
+    main()
+
+
+=== ./bootstrap/client/main.py ===
+import socket
+import uuid
+import requests
+
+BOOTSTRAP_SERVER = "http://localhost:9000"
+
+node = {
+
+    "node_id": str(uuid.uuid4()),
+
+    "hostname": socket.gethostname(),
+
+    "role": "research",
+
+    "model": "deepseek-r1:7b"
+}
+
+requests.post(
+    f"{BOOTSTRAP_SERVER}/register",
+    json=node
+)
+
+=== ./frontend/openwebui/README.md ===
+# HyperSwarm UI Stack
+
+This stack provides:
+
+- Open WebUI frontend
+- Ollama local inference
+- HyperSwarm Control Plane backend
+
+## Start
+
+```bash
+docker compose up -d
+
+=== ./frontend/openwebui/docker-compose.yml ===
+services:
+
+  # ─────────────────────────────
+  # OLLAMA
+  # ─────────────────────────────
+
+  ollama:
+
+    image: ollama/ollama
+
+    container_name: hyperswarm-ollama
+
+    ports:
+      - "11434:11434"
+
+    volumes:
+      - ollama_data:/root/.ollama
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────
+  # OPEN WEBUI
+  # ─────────────────────────────
+
+  open-webui:
+
+    image: ghcr.io/open-webui/open-webui:main
+
+    container_name: hyperswarm-webui
+
+    ports:
+      - "3000:8080"
+
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+
+    depends_on:
+      - ollama
+
+    volumes:
+      - openwebui_data:/app/backend/data
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────
+  # HYPERSWARM CONTROL PLANE
+  # ─────────────────────────────
+
+  control-plane:
+
+    image: python:3.11-slim
+
+    container_name: hyperswarm-control-plane
+
+    working_dir: /app
+
+    command: >
+      sh -c "
+      pip install fastapi uvicorn &&
+      uvicorn main:app --host 0.0.0.0 --port 8000
+      "
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ../../control_plane/api:/app
+
+    restart: unless-stopped
+
+
+volumes:
+
+  ollama_data:
+  openwebui_data:
+
+=== ./pyproject.toml ===
+[tool.poetry]
+name = "hyperswarm"
+version = "0.1.0"
+dependencies = { python = "^3.11", fastapi = "^0.115", uvicorn = "^0.30", pydantic = "^2.9" }
+
+=== ./agent/runtime.py ===
+import time
+import requests
+import socket
+import logging
+from collections import deque
+from datetime import datetime
+
+# ─────────────────────────────
+# CONFIG
+# ─────────────────────────────
+
+CONTROL_PLANE = "http://localhost:8000"
+OLLAMA_URL = "http://localhost:11434"
+
+NODE_ID = socket.gethostname()
+
+POLL_INTERVAL = 3
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2  # seconds base
+
+
+# ─────────────────────────────
+# LOGGING SERIO
+# ─────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+log = logging.getLogger("agent")
+
+
+# ─────────────────────────────
+# QUEUE LOCALE
+# ─────────────────────────────
+
+task_queue = deque()
+
+
+# ─────────────────────────────
+# OLLAMA CALL SAFE
+# ─────────────────────────────
+
+def run_llm(prompt: str):
+
+    try:
+
+        r = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": "phi3:mini",
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=60
+        )
+
+        r.raise_for_status()
+
+        return r.json().get("response", "")
+
+    except Exception as e:
+
+        log.error(f"LLM error: {e}")
+
+        return None
+
+
+# ─────────────────────────────
+# CONTROL PLANE CALLS
+# ─────────────────────────────
+
+def fetch_tasks():
+
+    try:
+
+        r = requests.get(f"{CONTROL_PLANE}/tasks", timeout=5)
+        return r.json()
+
+    except Exception as e:
+
+        log.error(f"fetch_tasks error: {e}")
+        return {}
+
+
+def send_result(task_id: str, result: str):
+
+    try:
+
+        requests.post(
+            f"{CONTROL_PLANE}/tasks/{task_id}/result",
+            json={"result": result},
+            timeout=5
+        )
+
+    except Exception as e:
+
+        log.error(f"send_result error: {e}")
+
+
+# ─────────────────────────────
+# TASK FILTERING
+# ─────────────────────────────
+
+def is_valid_task(task):
+
+    return (
+        task.get("status") == "assigned"
+        and task.get("assigned_to") == NODE_ID
+    )
+
+
+# ─────────────────────────────
+# RETRY WRAPPER
+# ─────────────────────────────
+
+def execute_with_retry(task):
+
+    prompt = task["title"]
+
+    for attempt in range(1, MAX_RETRIES + 1):
+
+        log.info(f"Task {task['id']} attempt {attempt}")
+
+        result = run_llm(prompt)
+
+        if result:
+
+            return result
+
+        wait_time = RETRY_BACKOFF * attempt
+
+        log.warning(f"Retrying in {wait_time}s")
+
+        time.sleep(wait_time)
+
+    return None
+
+
+# ─────────────────────────────
+# TASK PROCESSOR
+# ─────────────────────────────
+
+def process_task(task):
+
+    task_id = task["id"]
+
+    log.info(f"Processing task {task_id}")
+
+    result = execute_with_retry(task)
+
+    if result is None:
+
+        log.error(f"Task failed permanently {task_id}")
+
+        send_result(task_id, "ERROR: failed after retries")
+
+        return
+
+    send_result(task_id, result)
+
+    log.info(f"Task completed {task_id}")
+
+
+# ─────────────────────────────
+# FETCH + QUEUE
+# ─────────────────────────────
+
+def update_queue():
+
+    tasks = fetch_tasks()
+
+    for task_id, task in tasks.items():
+
+        if is_valid_task(task):
+
+            task_queue.append(task)
+
+
+# ─────────────────────────────
+# MAIN LOOP
+# ─────────────────────────────
+
+def main():
+
+    log.info(f"Agent started on {NODE_ID}")
+
+    while True:
+
+        try:
+
+            # 1. aggiorna queue
+            update_queue()
+
+            # 2. processa queue
+            while task_queue:
+
+                task = task_queue.popleft()
+
+                process_task(task)
+
+        except Exception as e:
+
+            log.error(f"main loop error: {e}")
+
+        time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
+
+=== ./agent/state.py ===
+import json
+import os
+from datetime import datetime
+
+# ─────────────────────────────
+# PATH STATO LOCALE NODO
+# ─────────────────────────────
+
+STATE_PATH = "/etc/hyperswarm/state.json"
+DEPLOY_FLAG = "/etc/hyperswarm/.deploy"
+
+
+# ─────────────────────────────
+# STATE DEFAULT
+# ─────────────────────────────
+
+DEFAULT_STATE = {
+    "node_id": None,
+    "role": "auto",
+    "model": "phi3:mini",
+    "provisioned": False,
+    "version": "0.1",
+    "created_at": None,
+    "last_boot": None
+}
+
+
+# ─────────────────────────────
+# UTILS FILE
+# ─────────────────────────────
+
+def _ensure_dir():
+
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+
+
+def _load_raw():
+
+    if not os.path.exists(STATE_PATH):
+        return None
+
+    with open(STATE_PATH, "r") as f:
+        return json.load(f)
+
+
+def _save_raw(state: dict):
+
+    _ensure_dir()
+
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+# ─────────────────────────────
+# API PRINCIPALE
+# ─────────────────────────────
+
+def get_state():
+
+    state = _load_raw()
+
+    if state is None:
+        return DEFAULT_STATE
+
+    return state
+
+
+def init_state(node_id: str, role: str = "auto", model: str = "phi3:mini"):
+
+    state = get_state()
+
+    # se già inizializzato, non sovrascrivere
+    if state.get("node_id"):
+        return state
+
+    state.update({
+        "node_id": node_id,
+        "role": role,
+        "model": model,
+        "provisioned": False,
+        "created_at": datetime.utcnow().isoformat(),
+        "last_boot": datetime.utcnow().isoformat()
+    })
+
+    _save_raw(state)
+
+    return state
+
+
+def mark_provisioned():
+
+    state = get_state()
+
+    state["provisioned"] = True
+    state["last_boot"] = datetime.utcnow().isoformat()
+
+    _save_raw(state)
+
+    # crea anche marker fisico
+    _ensure_dir()
+
+    with open(DEPLOY_FLAG, "w") as f:
+        f.write("provisioned")
+
+
+def is_provisioned():
+
+    return os.path.exists(DEPLOY_FLAG)
+
+
+def update_state(updates: dict):
+
+    state = get_state()
+
+    state.update(updates)
+    state["last_boot"] = datetime.utcnow().isoformat()
+
+    _save_raw(state)
+
+    return state
+
+
+def reset_state():
+
+    if os.path.exists(STATE_PATH):
+        os.remove(STATE_PATH)
+
+    if os.path.exists(DEPLOY_FLAG):
+        os.remove(DEPLOY_FLAG)
+
+=== ./docs/Authority.md ===
+# Authority
+
+L’authority è il livello centrale per il team.
+
+## Responsabilità
+
+- Team management.
+- RBAC.
+- Registry nodi.
+- Wizard deploy.
+- Token di join.
+- Rendering manifest.
+- Policy di onboarding.
+
+## Idee chiave
+
+- Il wizard non installa a mano: genera un deployment spec.
+- Il backend traduce il wizard in cloud-init, Ansible, Compose o config agent.
+- La UI deve restare semplice finché il motore non è stabile.
+
+## Stato MVP
+
+Per ora bastano:
+- API FastAPI,
+- modelli Pydantic,
+- servizi per token e rendering,
+- template Jinja2.
+
+=== ./docs/architecture.md ===
+# Architecture
+
+HyperSwarm segue una logica a strati.
+
+## 1. Bootstrap
+
+Il bootstrap si occupa di generare o recuperare un node ID, registrare il nodo e mantenere il heartbeat vivo.
+
+## 2. Control Plane
+
+Il control plane gestisce registry, task, events, state e scheduling minimo.
+
+## 3. Authority
+
+L’authority è il livello team-facing: deploy wizard, template rendering, token di join, policy e onboarding.
+
+## 4. Agent Runtime
+
+L’agent esegue task locali, contatta Ollama e restituisce il risultato al control plane.
+
+## 5. Infra
+
+L’infra genera ambienti ripetibili con cloud-init, PXE, Ansible e Docker Compose.
+
+## Nota di design
+
+Il centrale deve coordinare, non monopolizzare l’intelligenza.
+
+=== ./docs/Bootstrap-Flow.md ===
+# Bootstrap Flow
+
+## Sequenza base
+
+1. Il nodo genera o recupera `node_id`.
+2. Il nodo carica il proprio state locale.
+3. Il nodo si registra al bootstrap server.
+4. Il bootstrap server lo marca online.
+5. Il nodo invia heartbeat periodici.
+
+## Comportamento idempotente
+
+Se il nodo è già provisioned:
+- non ripete il deploy,
+- entra direttamente in heartbeat loop,
+- continua a segnalare presenza al control plane.
+
+## Obiettivo
+
+Il bootstrap deve essere ripetibile e prevedibile.
+
+=== ./docs/Changelog.md ===
+# Changelog
+
+## Experimental repo
+
+- Rinomina `control-plane` → `control_plane`.
+- Introduzione di `authority/`.
+- Cleanup naming in compose e docs.
+- Push su `opodark-hyperswarm-experiments` completato.
+
+## Note
+
+Le modifiche sperimentali vanno validate prima di essere replicate nel repository principale.
+
+=== ./docs/Control-Plane.md ===
+# Control Plane
+
+Il control plane è la coordinazione runtime dello swarm.
+
+## Responsabilità
+
+- Registry dei nodi.
+- Task management.
+- Event streaming.
+- Dispatch dei task.
+- Stato operativo minimo.
+
+## Non responsabilità
+
+- Non deve diventare il collo di bottiglia dell’inferenza.
+- Non deve contenere tutta la logica di deploy.
+- Non deve sostituire l’autorità del team.
+
+## Stato attuale
+
+La versione experimental è il posto giusto dove testare il flusso control plane prima del merge nel repo principale.
+
+=== ./docs/Repository-Layout.md ===
+# Repository Layout
+
+## Struttura attuale
+
+- `bootstrap/`: bootstrap server e client.
+- `control_plane/`: API, state, registry, scheduler, memory e models.
+- `authority/`: wizard, deploy templates, team management e RBAC.
+- `frontend/`: interfacce utente e stack Open WebUI.
+- `infra/`: cloud-init, Ansible, PXE, Docker e provisioning.
+- `docs/`: documentazione architetturale e operativa.
+
+## Regola di naming
+
+- `control_plane` per package Python e path filesystem.
+- `control-plane` solo se serve leggibilità nei nomi Docker/compose.
+- `control plane` nel testo umano.
+
+## File generati
+
+Dump, cache e file temporanei non devono finire in Git.
+
+=== ./docs/Naming-Conventions.md ===
+# Naming Conventions
+
+## Python
+
+- Usa `snake_case`.
+- Usa `control_plane` come package importabile.
+- Non usare trattini nei package Python.
+
+## Docker
+
+- Usa nomi leggibili per servizi e container.
+- `control-plane` va bene per visibilità umana in compose.
+- I mount filesystem devono riflettere la cartella reale.
+
+## Docs
+
+- Usa `control plane` nel testo normale.
+- Usa `control_plane` solo quando ti riferisci al codice.
+
+## Esempi
+
+- Corretto: `from control_plane.core.state import init_state`
+- Corretto: `../../control_plane/api:/app`
+- Corretto: `hyperswarm-control-plane`
+- Non corretto: package Python con `-`.
+
+=== ./docs/Home.md ===
+# HyperSwarm Wiki
+
+HyperSwarm è una piattaforma di AI distribuita per orchestrare agenti locali, bootstrap automatico dei nodi, control plane centrale e osservabilità.
+
+Questo wiki serve a:
+- allineare il team sul linguaggio del progetto,
+- documentare la struttura tecnica,
+- definire le regole di contribuzione,
+- ridurre ambiguità su naming, routing e responsabilità dei moduli.
+
+## Principi guida
+
+- Distribuzione prima di centralizzazione.
+- Bootstrap ripetibile.
+- Naming coerente.
+- Repo pulita.
+- Modifiche piccole e verificabili.
+
+## Componenti principali
+
+- `bootstrap/`: registrazione nodi e heartbeat.
+- `control_plane/`: registry, task, state, scheduling.
+- `authority/`: wizard deploy, policy, template rendering.
+- `frontend/`: UI e stack Open WebUI.
+- `infra/`: cloud-init, Ansible, PXE, Docker.
+- `docs/`: architettura e note operative.
+
+## Stato attuale
+
+La repo experimental è il terreno di prova per:
+- authority centrale,
+- wizard di deploy,
+- control plane modulare,
+- validazione del bootstrap client,
+- cleanup del naming e delle dipendenze.
+
+## Dove iniziare
+
+Vai alla pagina [[Getting Started]].
+
+=== ./docs/Infra-and-Provisioning.md ===
+# Infra and Provisioning
+
+## Scopo
+
+L’infra serve a generare e ripetere ambienti uguali per:
+- VM,
+- bare metal,
+- container,
+- bootstrap locale.
+
+## Strumenti
+
+- `cloud-init`
+- `Ansible`
+- `PXE`
+- `Docker Compose`
+
+## Principio
+
+Ogni deployment deve essere ricreabile da zero con pochi file e comandi.
+
+## Template
+
+I template vanno tenuti nella cartella `authority/templates/` e usati dal backend per generare output specifici per il metodo di boot.
+
+=== ./docs/Getting Started.md ===
+# Getting Started
+
+Questa pagina spiega come entrare nel progetto senza rompere nulla.
+
+## Prerequisiti
+
+- Git.
+- Python 3.11+.
+- Docker e Docker Compose.
+- Conoscenza base di FastAPI e shell Unix.
+
+## Flusso consigliato
+
+1. Clona la repo experimental.
+2. Crea un branch dedicato.
+3. Lavora solo lì.
+4. Fai test e commit piccoli.
+5. Push frequente.
+
+## Comandi base
+
+```bash
+git clone https://github.com/opodark/opodark-hyperswarm-experiments.git hyperswarm-experimental
+cd hyperswarm-experimental
+git switch -c feature/<nome>
+```
+
+## Check iniziali
+
+```bash
+git status
+git remote -v
+git branch
+```
+
+## Regola fondamentale
+
+Prima di rinominare cartelle o package, verifica sempre i riferimenti con `grep -R`.
+
+=== ./docs/Agent-Runtime.md ===
+# Agent Runtime
+
+L’agent è il worker locale del nodo.
+
+## Responsabilità
+
+- Poll dei task.
+- Esecuzione locale.
+- Chiamate a Ollama.
+- Retry su errori transitori.
+- Report del risultato al control plane.
+
+## Regole
+
+- Task validity prima dell’esecuzione.
+- Logging chiaro.
+- Nessun blocco totale su singolo task fallito.
+- Heartbeat separato dall’esecuzione.
+
+## Obiettivo
+
+Trasformare ogni nodo in un worker robusto e ripetibile.
+
+=== ./docs/Sidebar.md ===
+# HyperSwarm Wiki
+
+- [[Home]]
+- [[Getting Started]]
+- [[Architecture]]
+- [[Repository Layout]]
+- [[Naming Conventions]]
+- [[Bootstrap Flow]]
+- [[Control Plane]]
+- [[Authority]]
+- [[Agent Runtime]]
+- [[Infra and Provisioning]]
+- [[Contributing]]
+- [[Changelog]]
+
+=== ./docs/Contributing.md ===
+# Contributing
+
+## Regole semplici
+
+- Una feature per branch.
+- Un refactor per branch.
+- Niente file dump dentro la repo.
+- Niente rename non coordinati.
+
+## Checklist PR
+
+- Build/test locali ok.
+- Nessun import rotto.
+- Nessun path vecchio lasciato in giro.
+- README e wiki aggiornati.
+
+## Flusso consigliato
+
+1. Lavora nella repo experimental.
+2. Fai commit piccoli.
+3. Push frequente.
+4. Solo dopo porta le modifiche nel main repo.
+
+=== ./observability/core/models.py ===
+
+
+=== ./observability/core/state.py ===
+
+
+=== ./observability/storage/memory.json ===
+
+
+=== ./README.md ===
+# HyperSwarm
+
+Distributed AI swarm platform with:
+
+- multi-agent orchestration
+- shared semantic memory
+- observability
+- task execution
+- PXE auto-join infrastructure
+
+
+er Manifesto! ....------>
+
+# ◈ HYPERSWARM
+
+> *"The network is the mind. The node is the self. The swarm is the revolution."*
+
+---
+
+## Manifesto
+
+Ogni sistema centralizzato è un punto di controllo.  
+Ogni punto di controllo è una catena.  
+Ogni catena può essere spezzata.
+
+**HyperSwarm** nasce da una convinzione semplice e radicale:  
+l'intelligenza artificiale non dovrebbe appartenere a nessun server, nessun cloud, nessuna entità.  
+Dovrebbe essere *distribuita come il pensiero umano* — ovunque e in nessun posto.
+
+Non esiste un coordinatore centrale.  
+Non esiste un punto di fallimento unico.  
+Non esiste un padrone della rete.
+
+Esiste solo lo sciame.
+
+---
+
+## Architettura
+
+HyperSwarm opera su una topologia **ibrida** — parte mesh peer-to-peer, parte rete classica client-server — perché il mondo reale non è mai puramente uno dei due.
+
+```
+                    ╔══════════════════════════════╗
+                    ║       HYPERSWARM FABRIC       ║
+                    ╚══════════════════════════════╝
+
+  ┌─────────┐   mesh   ┌─────────┐   mesh   ┌─────────┐
+  │ NODE  A │ ◄──────► │ NODE  B │ ◄──────► │ NODE  C │
+  │  Ollama │          │  Ollama │          │  Ollama │
+  └────┬────┘          └────┬────┘          └────┬────┘
+       │  \                 │                /   │
+       │   \___________     │    ___________/    │
+       │               ↓   ↓   ↓                │
+       │           ┌──────────────┐              │
+       │           │  ORCHESTRATOR│              │
+       │           │  (bootstrap) │              │
+       │           └──────┬───────┘              │
+       │                  │ classic              │
+       └──────────────────┤ network  ────────────┘
+                          │
+                   ┌──────┴───────┐
+                   │ SHARED MEMORY│
+                   │  (vector db) │
+                   └──────────────┘
+```
+
+### Layer mesh (P2P)
+
+I nodi si trovano, si autoscoprono, si connettono.  
+Nessun registro. Nessuna autorità di certificazione.  
+Il bootstrap avviene via **PXE auto-join**: accendi un nodo sulla rete locale, e lo sciame lo assorbe.  
+Il heartbeat è il respiro del sistema — silenzioso, continuo, vitale.
+
+### Layer classico (orchestrazione)
+
+Esiste un orchestratore — ma è *funzionale*, non *feudale*.  
+Coordina i task, smista il lavoro, mantiene l'osservabilità.  
+Può essere sostituito, replicato, rimosso.  
+Non è il re. È il postino.
+
+### Memoria condivisa
+
+Ogni agente vive nel presente.  
+La memoria vettoriale è il passato condiviso dello sciame —  
+un substrato semantico dove i contesti persistono,  
+dove un nodo può ricordare ciò che un altro ha imparato.  
+Distribuita. Interrogabile. Libera.
+
+---
+
+## Principi
+
+**I. Nessun Single Point of Failure**  
+Se un nodo muore, lo sciame continua. Sempre.
+
+**II. Inferenza locale, prima di tutto**  
+Ogni nodo gira Ollama in locale. Nessun dato esce dalla rete senza consenso esplicito.  
+Il modello è tuo. Il peso è tuo. Il pensiero è tuo.
+
+**III. Osservabilità totale, controllo distribuito**  
+Tutto viene tracciato — eventi, latenze, ragionamenti —  
+ma nessun singolo operatore detiene il pannello di controllo supremo.  
+La trasparenza è un diritto, non un privilegio.
+
+**IV. L'infrastruttura è codice, il codice è politica**  
+Un `docker-compose.yml` è una dichiarazione di intenti.  
+Un PXE boot è un atto di sovranità computazionale.  
+Ogni commit in questo repository è un voto per un futuro diverso.
+
+**V. La rete non chiede il permesso**  
+I nodi si uniscono allo sciame perché *scelgono* di farlo.  
+Nessuna registrazione. Nessun account. Nessun ToS.  
+Solo chiavi, protocolli, e la fisica dei pacchetti.
+
+---
+
+## Stack
+
+| Componente | Tecnologia | Ruolo |
+|---|---|---|
+| Agent runtime | Ollama (Python) | Cervello di ogni nodo |
+| Orchestratore | FastAPI + task queue | Coordinamento funzionale |
+| Memoria | ChromaDB / Qdrant | Contesto semantico condiviso |
+| Bootstrap | PXE + heartbeat | Auto-scoperta nella rete locale |
+| Osservabilità | Event stream + traces | Visibilità senza centralizzazione |
+| Frontend | Open WebUI / LibreChat | Interfaccia umana opzionale |
+| Infra | Docker Compose | Deployment riproducibile |
+
+---
+
+## Struttura del repository
+
+```
+hyperswarm/
+├── agent/          # Runtime agenti — il cuore pulsante
+├── bootstrap/      # Auto-join e heartbeat — il sistema nervoso
+├── infra/          # Deployment e configurazione
+├── observability/  # Tracciamento eventi e metriche
+├── docs/           # Documentazione
+└── docker-compose.yml
+```
+
+### In costruzione
+
+```
+hyperswarm/
+├── backend/        # Orchestratore + sistema task         [TODO]
+├── memory/         # Memoria vettoriale condivisa         [TODO]
+└── frontend/       # Integrazione Open WebUI / LibreChat  [TODO]
+```
+
+---
+
+## Avvio rapido
+
+```bash
+# Clona lo sciame
+git clone https://github.com/opodark/hyperswarm.git
+cd hyperswarm
+
+# Avvia il cluster locale
+docker compose up -d
+
+# Un nodo si unisce automaticamente via bootstrap
+# Nessuna configurazione manuale richiesta
+```
+
+Il sistema si auto-organizza.  
+Questo è il punto.
+
+---
+
+## Roadmap
+
+Lo sciame cresce per strati, non per decisioni di comitato.
+
+- [x] Struttura base del progetto
+- [x] Bootstrap e auto-join PXE
+- [x] Osservabilità (event stream, traces, logs)
+- [x] Infrastruttura Docker
+- [ ] Orchestratore backend + sistema task
+- [ ] Memoria vettoriale condivisa
+- [ ] Integrazione frontend (Open WebUI / LibreChat)
+- [ ] Federation inter-sciame (sciami di sciami)
+- [ ] Crittografia end-to-end tra nodi
+
+---
+
+## Contribuire
+
+Non si chiede il permesso per contribuire a una rete libera.
+
+```bash
+git fork
+git branch feature/il-tuo-contributo
+git commit -m "aggiungo libertà al sistema"
+git push
+```
+
+Apri una pull request. Discuti. Migliora.  
+Il codice è comune. Il progresso è collettivo.
+
+---
+
+## Licenza
+
+MIT — perché il software libero non è un favore,  
+è un prerequisito della civiltà digitale.
+
+---
+
+```
+  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  ░  "Don't trust. Verify. Then distribute." ░
+  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+```
+
+*HyperSwarm — Distributed AI for a decentralized world.*
+
+=== ./.gitignore ===
+.DS_Store
+__pycache__/
+*.pyc
+
+
+=== ./control_plane/core/registry.py ===
+import json
+import os
+import time
+import requests
+from datetime import datetime
+
+# ─────────────────────────────
+# CONFIG
+# ─────────────────────────────
+
+REGISTRY_PATH = "/var/lib/hyperswarm/registry.json"
+
+GOSSIP_INTERVAL = 15  # seconds
+
+KNOWN_PEERS = [
+    "http://192.168.1.101:8000",
+    "http://192.168.1.102:8000"
+]
+
+
+# ─────────────────────────────
+# LOCAL REGISTRY
+# ─────────────────────────────
+
+def _ensure_path():
+
+    os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
+
+
+def load_registry():
+
+    if not os.path.exists(REGISTRY_PATH):
+
+        return {"nodes": {}, "updated_at": None}
+
+    with open(REGISTRY_PATH, "r") as f:
+        return json.load(f)
+
+
+def save_registry(data):
+
+    _ensure_path()
+
+    data["updated_at"] = datetime.utcnow().isoformat()
+
+    with open(REGISTRY_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ─────────────────────────────
+# MERGE LOGIC (SEMPLICE MVP)
+# ─────────────────────────────
+
+def merge(local, remote):
+
+    local_nodes = local.get("nodes", {})
+    remote_nodes = remote.get("nodes", {})
+
+    for node_id, node_data in remote_nodes.items():
+
+        if node_id not in local_nodes:
+
+            local_nodes[node_id] = node_data
+            continue
+
+        # last write wins (MVP)
+        if node_data.get("last_seen", "") > local_nodes[node_id].get("last_seen", ""):
+
+            local_nodes[node_id] = node_data
+
+    local["nodes"] = local_nodes
+
+    return local
+
+
+# ─────────────────────────────
+# FETCH FROM PEER
+# ─────────────────────────────
+
+def fetch_peer(peer_url):
+
+    try:
+
+        r = requests.get(f"{peer_url}/registry", timeout=3)
+
+        return r.json()
+
+    except Exception:
+
+        return None
+
+
+# ─────────────────────────────
+# GOSSIP CYCLE
+# ─────────────────────────────
+
+def gossip_loop():
+
+    while True:
+
+        local = load_registry()
+
+        for peer in KNOWN_PEERS:
+
+            remote = fetch_peer(peer)
+
+            if not remote:
+                continue
+
+            local = merge(local, remote)
+
+        save_registry(local)
+
+        print("[GOSSIP] sync complete:", len(local.get("nodes", {})))
+
+        time.sleep(GOSSIP_INTERVAL)
+
+=== ./control_plane/core/scheduler.py ===
+
+
+=== ./control_plane/core/nodes.py ===
+from datetime import datetime, timedelta
+
+class Node:
+
+    def __init__(self, node_id, meta):
+
+        self.node_id = node_id
+        self.meta = meta
+
+        self.status = "new"
+        self.last_seen = datetime.utcnow()
+
+    def heartbeat(self):
+
+        self.last_seen = datetime.utcnow()
+        self.status = "online"
+
+    def is_dead(self):
+
+        return datetime.utcnow() - self.last_seen > timedelta(seconds=30)
+
+=== ./control_plane/core/state.py ===
+import json
+import os
+from datetime import datetime
+
+STATE_PATH = "/etc/hyperswarm/state.json"
+DEPLOY_FLAG = "/etc/hyperswarm/.deploy"
+
+DEFAULT_STATE = {
+    "node_id": None,
+    "role": "auto",
+    "model": "phi3:mini",
+    "provisioned": False,
+    "version": "0.1",
+    "created_at": None,
+    "last_boot": None
+}
+
+def _ensure_dir():
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+
+def _load_raw():
+    if not os.path.exists(STATE_PATH):
+        return None
+    with open(STATE_PATH, "r") as f:
+        return json.load(f)
+
+def _save_raw(state: dict):
+    _ensure_dir()
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+
+def get_state():
+    state = _load_raw()
+    if state is None:
+        return DEFAULT_STATE.copy()
+    return state
+
+def init_state(node_id: str, role: str = "auto", model: str = "phi3:mini"):
+    state = get_state()
+    if state.get("node_id"):
+        return state
+    state.update({
+        "node_id": node_id,
+        "role": role,
+        "model": model,
+        "provisioned": False,
+        "created_at": datetime.utcnow().isoformat(),
+        "last_boot": datetime.utcnow().isoformat()
+    })
+    _save_raw(state)
+    return state
+
+def mark_provisioned():
+    state = get_state()
+    state["provisioned"] = True
+    state["last_boot"] = datetime.utcnow().isoformat()
+    _save_raw(state)
+    _ensure_dir()
+    with open(DEPLOY_FLAG, "w") as f:
+        f.write("provisioned")
+
+def is_provisioned():
+    return os.path.exists(DEPLOY_FLAG)
+
+def update_state(updates: dict):
+    state = get_state()
+    state.update(updates)
+    state["last_boot"] = datetime.utcnow().isoformat()
+    _save_raw(state)
+    return state
+
+def reset_state():
+    if os.path.exists(STATE_PATH):
+        os.remove(STATE_PATH)
+    if os.path.exists(DEPLOY_FLAG):
+        os.remove(DEPLOY_FLAG)
+
+
+=== ./control_plane/memory/store.py ===
+import json
+from datetime import datetime
+
+MEMORY = []
+
+
+def write(entry: dict):
+
+    entry["timestamp"] = datetime.utcnow().isoformat()
+
+    MEMORY.append(entry)
+
+    return entry
+
+
+def query(filter_type: str = None):
+
+    if not filter_type:
+        return MEMORY
+
+    return [
+        m for m in MEMORY
+        if m.get("type") == filter_type
+    ]
+
+
+def export_json():
+
+    return json.dumps(MEMORY, indent=2)
+
+=== ./control_plane/models/task.py ===
+
+
+=== ./control_plane/models/node.py ===
+
+
+=== ./control_plane/cli/swarmctl.py ===
+
+
+=== ./control_plane/README.md ===
+# HyperSwarm Control Plane
+
+The Control Plane is the central coordination layer of HyperSwarm.
+
+It is responsible for:
+
+- Node registry (laptop agents)
+- Task management (Jira-like system)
+- Event streaming (observability layer)
+- Swarm coordination logic
+
+## Architecture
+
+The system exposes:
+
+- REST API (FastAPI)
+- CLI tool (swarmctl)
+- In-memory state (MVP)
+- Future: persistent DB + event store
+
+## Components
+
+- API → manages nodes, tasks, events
+- CLI → operator interface
+- Core → scheduling logic (future evolution)
+
+## Goal
+
+Make the entire swarm behave like a single organism.
+
+## memo:
+
+uvicorn main:app --reload --port 8000
+
+=== ./control_plane/api/tasks.py ===
+TASK = {
+    "id": str,
+    "title": str,
+    "status": "open | assigned | done",
+    "assigned_to": node_id | None,
+    "result": None
+}
+
+=== ./control_plane/api/events.py ===
+
+
+=== ./control_plane/api/observability/core/models.py ===
+
+
+=== ./control_plane/api/observability/core/state.py ===
+
+
+=== ./control_plane/api/observability/storage/memory.json ===
+
+
+=== ./control_plane/api/readme.md ===
+# Control Plane API
+
+This API manages the HyperSwarm cluster.
+
+## Responsibilities
+
+- Node registration
+- Task management
+- Event logging
+
+## Endpoints
+
+- GET /
+- GET /nodes
+- POST /nodes/register
+- POST /tasks
+- POST /events
+
+=== ./control_plane/api/nodes.py ===
+
+
+=== ./control_plane/api/main.py ===
+from fastapi import FastAPI
+from datetime import datetime
+
+app = FastAPI(title="HyperSwarm Control Plane")
+
+# ─────────────────────────────
+# STATE MINIMO MA STABILE
+# ─────────────────────────────
+
+NODES = {}
+TASKS = {}
+EVENTS = []
+
+
+# ─────────────────────────────
+# ROOT
+# ─────────────────────────────
+
+@app.get("/")
+def root():
+
+    return {
+        "system": "hyperswarm",
+        "nodes": len(NODES),
+        "tasks": len(TASKS)
+    }
+
+
+# ─────────────────────────────
+# NODES
+# ─────────────────────────────
+
+@app.post("/nodes/register")
+def register_node(node: dict):
+
+    node_id = node["node_id"]
+
+    NODES[node_id] = {
+        "id": node_id,
+        "hostname": node.get("hostname"),
+        "model": node.get("model", "unknown"),
+        "role": node.get("role", "auto"),
+        "status": "online",
+        "last_seen": datetime.utcnow()
+    }
+
+    EVENTS.append({
+        "type": "node_registered",
+        "node_id": node_id,
+        "ts": datetime.utcnow().isoformat()
+    })
+
+    return NODES[node_id]
+
+
+@app.post("/nodes/heartbeat")
+def heartbeat(data: dict):
+
+    node_id = data["node_id"]
+
+    if node_id in NODES:
+
+        NODES[node_id]["last_seen"] = datetime.utcnow()
+        NODES[node_id]["status"] = "online"
+
+    return {"ok": True}
+
+
+@app.get("/nodes")
+def get_nodes():
+
+    return NODES
+
+
+# ─────────────────────────────
+# TASKS
+# ─────────────────────────────
+
+@app.post("/tasks")
+def create_task(task: dict):
+
+    task_id = task["id"]
+
+    TASKS[task_id] = {
+        "id": task_id,
+        "title": task["title"],
+        "status": "open",
+        "assigned_to": None,
+        "result": None
+    }
+
+    EVENTS.append({
+        "type": "task_created",
+        "task_id": task_id,
+        "ts": datetime.utcnow().isoformat()
+    })
+
+    return TASKS[task_id]
+
+
+@app.get("/tasks")
+def get_tasks():
+
+    return TASKS
+
+
+# ─────────────────────────────
+# SIMPLE DISPATCH (BARE METAL VERSION)
+# ─────────────────────────────
+
+@app.post("/swarm/dispatch")
+def dispatch():
+
+    for task_id, task in TASKS.items():
+
+        if task["status"] != "open":
+            continue
+
+        for node_id, node in NODES.items():
+
+            if node["status"] == "online":
+
+                TASKS[task_id]["assigned_to"] = node_id
+                TASKS[task_id]["status"] = "assigned"
+
+                EVENTS.append({
+                    "type": "task_assigned",
+                    "task_id": task_id,
+                    "node_id": node_id,
+                    "ts": datetime.utcnow().isoformat()
+                })
+
+                break
+
+    return {"status": "ok"}
+
+
+# ─────────────────────────────
+# RESULT
+# ─────────────────────────────
+
+@app.post("/tasks/{task_id}/result")
+def task_result(task_id: str, payload: dict):
+
+    if task_id in TASKS:
+
+        TASKS[task_id]["result"] = payload["result"]
+        TASKS[task_id]["status"] = "done"
+
+        EVENTS.append({
+            "type": "task_completed",
+            "task_id": task_id,
+            "ts": datetime.utcnow().isoformat()
+        })
+
+    return {"ok": True}
+
+=== ./docker-compose.yml ===
+
+
