@@ -48,11 +48,11 @@ services:
   # HYPERSWARM CONTROL PLANE
   # ─────────────────────────────
 
-  control-plane:
+  control_plane:
 
     image: python:3.11-slim
 
-    container_name: hyperswarm-control-plane
+    container_name: hyperswarm-control_plane
 
     working_dir: /app
 
@@ -66,7 +66,7 @@ services:
       - "8000:8000"
 
     volumes:
-      - ../../control-plane/api:/app
+      - ../../control_plane/api:/app
 
     restart: unless-stopped
 
